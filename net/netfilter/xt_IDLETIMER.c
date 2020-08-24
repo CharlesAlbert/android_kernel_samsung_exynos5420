@@ -61,33 +61,61 @@ struct idletimer_tg {
 	unsigned int refcnt;
 	bool send_nl_msg;
 	bool active;
+	uid_t uid;
 };
 
 static LIST_HEAD(idletimer_tg_list);
 static DEFINE_MUTEX(list_mutex);
 
 static struct kobject *idletimer_tg_kobj;
-
-static void notify_netlink_uevent(const char *label, struct idletimer_tg *timer)
+static void notify_netlink_uevent(const char *iface, struct idletimer_tg *timer)
 {
-	char label_msg[NLMSG_MAX_SIZE];
+	char iface_msg[NLMSG_MAX_SIZE];
 	char state_msg[NLMSG_MAX_SIZE];
-	char *envp[] = { label_msg, state_msg, NULL };
+	char timestamp_msg[NLMSG_MAX_SIZE];
+	char uid_msg[NLMSG_MAX_SIZE];
+	char *envp[] = { iface_msg, state_msg, timestamp_msg, uid_msg, NULL };
 	int res;
+	struct timespec ts;
+	uint64_t time_ns;
+	bool state;
 
-	res = snprintf(label_msg, NLMSG_MAX_SIZE, "LABEL=%s",
-		       label);
+	res = snprintf(iface_msg, NLMSG_MAX_SIZE, "INTERFACE=%s",
+		       iface);
 	if (NLMSG_MAX_SIZE <= res) {
 		pr_err("message too long (%d)", res);
 		return;
 	}
+
+	get_monotonic_boottime(&ts);
+	state = timer->active;
 	res = snprintf(state_msg, NLMSG_MAX_SIZE, "STATE=%s",
-		       timer->active ? "active" : "inactive");
+			state ? "active" : "inactive");
+
 	if (NLMSG_MAX_SIZE <= res) {
 		pr_err("message too long (%d)", res);
 		return;
 	}
-	pr_debug("putting nlmsg: <%s> <%s>\n", label_msg, state_msg);
+
+	if (state) {
+		res = snprintf(uid_msg, NLMSG_MAX_SIZE, "UID=%u", timer->uid);
+		if (NLMSG_MAX_SIZE <= res)
+			pr_err("message too long (%d)", res);
+	} else {
+		res = snprintf(uid_msg, NLMSG_MAX_SIZE, "UID=");
+		if (NLMSG_MAX_SIZE <= res)
+			pr_err("message too long (%d)", res);
+	}
+
+	time_ns = timespec_to_ns(&ts);
+	res = snprintf(timestamp_msg, NLMSG_MAX_SIZE, "TIME_NS=%llu", time_ns);
+	if (NLMSG_MAX_SIZE <= res) {
+		timestamp_msg[0] = '\0';
+		pr_err("message too long (%d)", res);
+	}
+
+	pr_debug("putting nlmsg: <%s> <%s> <%s> <%s>\n", iface_msg, state_msg,
+		 timestamp_msg, uid_msg);
 	kobject_uevent_env(idletimer_tg_kobj, KOBJ_CHANGE, envp);
 	return;
 
@@ -128,7 +156,7 @@ static ssize_t idletimer_tg_show(struct kobject *kobj, struct attribute *attr,
 		return sprintf(buf, "%u\n",
 			       jiffies_to_msecs(expires - now) / 1000);
 
-	if (timer->send_nl_msg)
+	if (timer && timer->send_nl_msg)
 		return sprintf(buf, "0 %d\n",
 			jiffies_to_msecs(now - expires) / 1000);
 	else
@@ -187,6 +215,7 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 	info->timer->refcnt = 1;
 	info->timer->send_nl_msg = (info->send_nl_msg == 0) ? false : true;
 	info->timer->active = true;
+	info->timer->uid = 0;
 
 	mod_timer(&info->timer->timer,
 		  msecs_to_jiffies(info->timeout * 1000) + jiffies);
